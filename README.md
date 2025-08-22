@@ -1,6 +1,4 @@
-# sellput-checker
-
-# 🚀 Sell Put Checker
+# 🚀 PutSniper
 
 An interactive tool for **Options Sellers** to analyze **Sell Put strategies** with automatic filters like IV, Delta, Bid/Ask Spread, and Annualized Returns.  
 Stop manually calculating option greeks — let the checker show you **the best put opportunities instantly**.  
@@ -21,7 +19,7 @@ Stop manually calculating option greeks — let the checker show you **the best 
 
 ## 🛠️ Usage 使用说明
 ```bash
-git clone https://github.com/yourname/sellput-checker.git
+git clone https://github.com/wuqiujie/PutSniper.git
 cd sellput-checker
 pip install -r requirements.txt
  ./run.sh
