@@ -1,7 +1,11 @@
 __pycache__/
 *.pyc
 .env
-.venv/
-venv/
-.ipynb_checkpoints/
-*.log
+.env.*
+.vscode/
+.idea/
+.DS_Store
+.streamlit/
+**/secrets.*
+**/*.ipynb_checkpoints/
+
