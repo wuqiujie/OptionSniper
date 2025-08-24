@@ -8,16 +8,12 @@ from sellput_checker.checklist import evaluate_chain_df
 # ──────────────────────────────────────────────────────────────────────────────
 # Language toggle and translation helper
 # ──────────────────────────────────────────────────────────────────────────────
-LANG_OPTIONS = ["Bilingual / 双语", "English", "中文"]
+LANG_OPTIONS = ["English", "中文"]
 lang_mode = st.sidebar.selectbox("Language / 语言", LANG_OPTIONS, index=0)
 
 def tr(cn: str, en: str) -> str:
-    """Return a string based on the current language mode."""
-    if lang_mode == "English":
-        return en
-    if lang_mode == "中文":
-        return cn
-    return f"{en} / {cn}"
+    """Return a string based on the current language mode (English/中文)."""
+    return cn if lang_mode == "中文" else en
 
 # 页面基本设置
 st.set_page_config(page_title="Sell Put Checker", layout="wide")
@@ -86,6 +82,11 @@ if ticker:
         min_value=0, value=100, step=10,
         help=tr("建议范围：50~500。越高=要求更活跃的合约，成交更容易；越低=可能较难成交。", "Suggested: 50–500. Higher = more active contracts, easier fills; lower = fills may be harder.")
     )  # ← 成交量门槛；高=更活跃更易成交，低=成交可能困难
+    # 提示：行权价相对现价的折价比例
+    st.caption(tr(
+        "折价百分比 = (现价 − 行权价) / 现价。通常选择比现价低 5%~15%。",
+        "Discount = (Spot − Strike) / Spot. Common choice: 5%–15% below spot."
+    ))
 
     if st.button(tr("获取推荐合约", "Get Suggestions")):
         # ──────────────────────────────────────────────────────────────────────
@@ -202,6 +203,14 @@ if ticker:
 
         # 合并后的结果再统一做最终筛选
         out = out[out["ok_all"] == True]
+        # 计算：行权价相对现价的折价（%）
+        try:
+            if 'spot' in locals() and spot and float(spot) > 0:
+                out["discount_pct"] = ((float(spot) - out["strike"]) / float(spot) * 100).round(2)
+            else:
+                out["discount_pct"] = np.nan
+        except Exception:
+            out["discount_pct"] = np.nan
 
         # 额外可选过滤：只保留有真实 B/A 的合约；或隐藏 THEO 兜底的行
         require_ba = st.sidebar.checkbox(
@@ -250,25 +259,24 @@ if ticker:
         # except Exception:
         #     pass
 
-        # 根据需要选择是否使用 last 兜底显示列（来自 evaluator 的 bid_display/ask_display/spread_display）
+        # 展示列（包含折价%）
         use_display = st.sidebar.checkbox(
             tr("使用 Last 兜底显示 Bid/Ask", "Use 'Last' fallback for Bid/Ask display"),
             value=True,
             help=tr("当夜间 Yahoo 报价缺失时，用 last 作为展示占位，不影响筛选逻辑。",
                     "When Yahoo nightly quotes are missing, show 'last' as placeholder without affecting filters.")
         )
-
         has_disp = all(c in out.columns for c in ["bid_display", "ask_display", "spread_display"])
 
         if use_display and has_disp:
             cols = [
-                "contract_symbol","strike","mid","single_return","annualized_return","iv","assign_prob_est",
+                "contract_symbol","strike","discount_pct","mid","single_return","annualized_return","iv","assign_prob_est",
                 "days_to_exp","margin_cash_secured","volume","open_interest",
                 "bid_display","ask_display","spread_display","itm_prob","delta","price_source"
             ]
         else:
             cols = [
-                "contract_symbol","strike","mid","single_return","annualized_return","iv","assign_prob_est",
+                "contract_symbol","strike","discount_pct","mid","single_return","annualized_return","iv","assign_prob_est",
                 "days_to_exp","margin_cash_secured","volume","open_interest",
                 "bid","ask","spread","itm_prob","delta","price_source"
             ]
@@ -303,6 +311,7 @@ if ticker:
             cols_map = {
                 "contract_symbol": "Contract",
                 "strike": "Strike",
+                "discount_pct": "Strike Discount vs Spot (%)",
                 "bid": "Bid",
                 "ask": "Ask",
                 "mid": "Mid",
@@ -326,6 +335,7 @@ if ticker:
             cols_map = {
                 "contract_symbol": "合约代码",
                 "strike": "行权价",
+                "discount_pct": "相对现价折价（%）",
                 "bid": "买价",
                 "ask": "卖价",
                 "mid": "中间价",
@@ -349,6 +359,7 @@ if ticker:
             cols_map = {
                 "contract_symbol": "合约代码 / Contract",
                 "strike": "行权价 / Strike",
+                "discount_pct": "相对现价折价（%） / Strike Discount vs Spot (%)",
                 "bid": "买价 / Bid",
                 "ask": "卖价 / Ask",
                 "mid": "中间价 / Mid",
@@ -370,4 +381,57 @@ if ticker:
             }
         show = show.rename(columns=cols_map)
 
-        st.dataframe(show, use_container_width=True)
+        # 保存结果到会话，避免勾选触发重跑导致表消失
+        st.session_state["last_table"] = show
+        st.success(tr("列表已更新。可在下方勾选进行比较。", "List updated. Use the checkboxes below to compare."))
+
+# ──────────────────────────────────────────────────────────────────────
+# 持久渲染：始终基于会话中的表显示（支持复选与对比）
+# ──────────────────────────────────────────────────────────────────────
+current = st.session_state.get("last_table")
+if isinstance(current, pd.DataFrame) and not current.empty:
+    select_col = "选择" if lang_mode == "中文" else "Select"
+    disp = current.copy()
+    if select_col not in disp.columns:
+        disp.insert(0, select_col, False)
+    else:
+        disp = disp[[select_col] + [c for c in disp.columns if c != select_col]]
+
+    edited = st.data_editor(
+        disp,
+        use_container_width=True,
+        num_rows="fixed",
+        hide_index=True,
+        column_config={
+            select_col: st.column_config.CheckboxColumn(
+                label=select_col,
+                help=tr("勾选要对比的合约", "Tick contracts to compare"),
+                default=False,
+            )
+        },
+        key="sellput_editor",
+    )
+
+    if st.button(tr("比较所选", "Compare selected")):
+        try:
+            chosen = edited[edited[select_col] == True].copy()
+        except Exception:
+            chosen = pd.DataFrame()
+        if chosen.empty:
+            st.warning(tr("请先勾选至少一条合约", "Please select at least one contract."))
+        else:
+            if select_col in chosen.columns:
+                chosen = chosen.drop(columns=[select_col])
+            pref = [
+                tr("合约代码", "Contract"), tr("行权价", "Strike"), tr("相对现价折价（%）", "Strike Discount vs Spot (%)"),
+                tr("年化（%）", "Annualized (%)"), tr("单期收益率（%）", "Period Return (%)"),
+                tr("隐含波动率（%）", "IV (%)"), tr("Delta（%）", "Delta (%)"), tr("价内概率（%）", "ITM Prob (%)"),
+                tr("剩余天数", "DTE"), tr("价差（$）", "Spread ($)"), tr("成交量", "Volume"), tr("未平仓量", "OI"),
+                tr("买价", "Bid"), tr("卖价", "Ask"), tr("中间价", "Mid")
+            ]
+            cols_exist = [c for c in pref if c in chosen.columns]
+            chosen = chosen[cols_exist] if cols_exist else chosen
+            st.subheader(tr("🆚 所选合约对比", "🆚 Comparison"))
+            st.dataframe(chosen, use_container_width=True)
+else:
+    st.info(tr("点击上方按钮以生成列表。", "Click the button above to generate the list."))
