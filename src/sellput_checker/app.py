@@ -4,6 +4,8 @@ import numpy as np
 
 from sellput_checker.yahoo_client import YahooClient
 from sellput_checker.checklist import evaluate_chain_df
+from sellput_checker.calculations import bs_d1_d2
+from sellput_checker.utils import norm_cdf
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Language toggle and translation helper
@@ -16,8 +18,22 @@ def tr(cn: str, en: str) -> str:
     return cn if lang_mode == "中文" else en
 
 # 页面基本设置
-st.set_page_config(page_title="Sell Put Checker", layout="wide")
-st.title(tr("📉 Sell Put 合约合理性检查", "📉 Sell Put Reasonableness Checker"))
+st.set_page_config(page_title="Option Strategy Checker", layout="wide")
+st.title(tr("期权策略筛选器", "Option Strategy Checker"))
+
+# 模式切换：卖出看跌 / 备兑看涨（Sidebar）
+mode_key = st.sidebar.radio(
+    tr("模式", "Mode"),
+    ["put", "call"],
+    index=0,
+    format_func=lambda x: tr("卖出看跌", "Sell Put") if x == "put" else tr("备兑看涨", "Covered Call")
+)
+
+# 子标题：根据模式在 Ticker 输入框之前显示
+if mode_key == "call":
+    st.subheader(tr("📈 Covered Call 合约筛选", "📈 Covered Call Screener"))
+else:
+    st.subheader(tr("📉 卖出看跌合约筛选", "📉 Sell Put Screener"))
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 输入区
@@ -30,6 +46,196 @@ ticker = st.text_input(
 
 if ticker:
     yc = YahooClient(ticker)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Covered Call 页面（若选择了“备兑看涨”模式，则渲染并中止后续 Sell Put 页面）
+    # ──────────────────────────────────────────────────────────────────────────
+    if mode_key == "call":
+
+        # 取到期日
+        expirations_cc = list(yc.get_expirations() or [])
+        if not expirations_cc:
+            st.error(tr("无法获取期权到期日，可能是网络问题或标的无期权。", "Failed to fetch expirations. Network issue or no options available for this ticker."))
+            st.stop()
+        exp_options_cc = [tr("自动（全部到期）", "Auto (All Expirations)")] + expirations_cc
+        exp_choice_cc = st.selectbox(
+            tr("选择到期日", "Expiration"),
+            exp_options_cc,
+            help=tr("常见到期：本周/次周/当月/季度/LEAPS。可保持“自动”以包含全部到期。",
+                    "Common expirations: weekly/monthly/quarterly/LEAPS. Keep 'Auto' to include all.")
+        )
+        selected_exps_cc = expirations_cc if exp_choice_cc == exp_options_cc[0] else [exp_choice_cc]
+
+        # 关键筛选因素（放在上面）
+        delta_high_cc = st.slider(
+            tr("Delta 上限", "Max Delta"), 0.0, 1.0, 0.30, 0.05,
+            help=tr("建议 0.20~0.30，越低=更保守（更远 OTM），越高=更激进（接近 ATM）。",
+                    "Suggested 0.20–0.30. Lower = more conservative (further OTM), higher = more aggressive (near ATM).")
+        )
+        min_premium_usd = st.number_input(
+            tr("最小权利金（$）", "Min Premium ($)"), min_value=0.0, value=0.50, step=0.05,
+            help=tr("卖出 Call 至少希望拿到的权利金（按中间价计算）。", "Minimum premium you want to receive (based on mid price).")
+        )
+        iv_min_cc_pct, iv_max_cc_pct = st.slider(
+            tr("隐含波动率 IV 区间（%）", "IV Range (%)"), 0.0, 300.0, (0.0, 120.0), 0.5
+        )
+        iv_min_cc, iv_max_cc = iv_min_cc_pct / 100.0, iv_max_cc_pct / 100.0
+        max_spread_cc = st.slider(tr("最大买卖价差（$）", "Max Bid-Ask Spread ($)"), 0.0, 3.0, 0.10, 0.01)
+        min_volume_cc = st.number_input(tr("最小成交量", "Min Volume"), min_value=0, value=100, step=10)
+        only_otm = st.checkbox(tr("仅显示价外（行权价 ≥ 现价）", "Only show OTM (Strike ≥ Spot)"), value=True)
+        min_strike_prem_pct = st.slider(
+            tr("行权价相对现价的溢价（%）下限", "Min Strike Premium vs Spot (%)"), 0.0, 50.0, 5.0, 0.5,
+            help=tr("溢价% = (行权价 − 现价) / 现价 × 100%（常见 5%~10%）",
+                    "Premium% = (Strike − Spot)/Spot × 100% (commonly 5%–10%).")
+        )
+
+        if st.button(tr("获取 Covered Call 推荐", "Get Covered Call Suggestions")):
+            spot_cc = yc.get_spot_price()
+            all_rows_cc = []
+            for exp in selected_exps_cc:
+                dfc = yc.get_option_chain(exp, kind="call")
+                if dfc.empty:
+                    continue
+                dfc["ticker"] = ticker
+                dfc["volume"] = pd.to_numeric(dfc.get("volume", pd.Series(dtype=float)), errors="coerce").fillna(0).astype(int)
+                dfc["open_interest"] = pd.to_numeric(dfc.get("open_interest", pd.Series(dtype=float)), errors="coerce").fillna(0).astype(int)
+                for col in ["bid", "ask", "strike"]:
+                    if col in dfc.columns:
+                        dfc[col] = pd.to_numeric(dfc[col], errors="coerce")
+                # 先复用统一评估（此处不使用 put-delta 过滤，稍后覆盖为 call-delta）
+                out_cc = evaluate_chain_df(
+                    dfc, spot_cc, exp,
+                    delta_high=1.0,  # 占位：稍后替换为 call delta 再过滤
+                    iv_min=iv_min_cc, iv_max=iv_max_cc,
+                    max_spread=max_spread_cc, min_volume=min_volume_cc, min_annual=min_premium_usd * 0.0  # 年化门槛保持与卖PUT无关，此处先不过滤
+                )
+                all_rows_cc.append(out_cc)
+
+            if not all_rows_cc:
+                st.error(tr("未获取到期权链。", "No option chain retrieved."))
+                st.stop()
+            out_cc = pd.concat(all_rows_cc, ignore_index=True)
+
+            # 计算：行权价相对现价的溢价（%）
+            out_cc["strike_premium_pct"] = ((out_cc["strike"] - float(spot_cc)) / float(spot_cc) * 100).round(2)
+
+            # 用 BS 计算 Call Delta（替换掉评估里基于 Put 的 delta）
+            def _call_delta_row(row):
+                try:
+                    S = float(spot_cc)
+                    K = float(row.get("strike", 0.0))
+                    sigma = float(row.get("iv", 0.0))
+                    T = max(1e-6, float(row.get("days_to_exp", 0)) / 365.0)
+                    r = 0.05
+                    d1, _ = bs_d1_d2(S, K, r, max(sigma, 1e-6), T)
+                    return float(norm_cdf(d1))
+                except Exception:
+                    return np.nan
+            out_cc["delta"] = out_cc.apply(_call_delta_row, axis=1)
+
+            # 基于参数做过滤
+            if only_otm:
+                out_cc = out_cc[out_cc["strike"] >= float(spot_cc)]
+            out_cc = out_cc[out_cc["mid"].fillna(0) >= float(min_premium_usd)]
+            out_cc = out_cc[out_cc["strike_premium_pct"].fillna(-1) >= float(min_strike_prem_pct)]
+            out_cc = out_cc[out_cc["delta"].fillna(1.0) <= float(delta_high_cc)]
+
+            # 排序（年化优先，其次溢价%）
+            out_cc = out_cc.sort_values(["annualized_return", "strike_premium_pct"], ascending=[False, False])
+
+            # 组装展示列
+            cols_cc = [
+                "contract_symbol", "strike", "strike_premium_pct", "mid", "annualized_return", "single_return",
+                "iv", "delta", "days_to_exp", "volume", "open_interest", "bid", "ask", "spread"
+            ]
+            show_cc = out_cc[cols_cc].copy()
+            if not show_cc.empty:
+                show_cc["iv"] = (show_cc["iv"] * 100).round(2)
+                show_cc["delta"] = (show_cc["delta"] * 100).round(2)
+                show_cc["annualized_return"] = (show_cc["annualized_return"] * 100).round(2)
+                show_cc["single_return"] = (show_cc["single_return"] * 100).round(2)
+
+            # 本地化列名
+            if lang_mode == "English":
+                cols_map_cc = {
+                    "contract_symbol": "Contract",
+                    "strike": "Strike",
+                    "strike_premium_pct": "Strike Premium vs Spot (%)",
+                    "mid": "Mid",
+                    "annualized_return": "Annualized (%)",
+                    "single_return": "Period Return (%)",
+                    "iv": "IV (%)",
+                    "delta": "Delta (%)",
+                    "days_to_exp": "DTE",
+                    "volume": "Volume",
+                    "open_interest": "OI",
+                    "bid": "Bid",
+                    "ask": "Ask",
+                    "spread": "Spread ($)",
+                }
+            else:
+                cols_map_cc = {
+                    "contract_symbol": "合约代码",
+                    "strike": "行权价",
+                    "strike_premium_pct": "相对现价溢价（%）",
+                    "mid": "中间价",
+                    "annualized_return": "年化（%）",
+                    "single_return": "单期收益率（%）",
+                    "iv": "隐含波动率（%）",
+                    "delta": "Delta（%）",
+                    "days_to_exp": "剩余天数",
+                    "volume": "成交量",
+                    "open_interest": "未平仓量",
+                    "bid": "买价",
+                    "ask": "卖价",
+                    "spread": "价差（$）",
+                }
+            show_cc = show_cc.rename(columns=cols_map_cc)
+
+            # 覆盖会话态并渲染（Covered Call 专用表）
+            st.session_state["last_table_call"] = show_cc
+
+            # 交互表（多选对比）
+            select_col_cc = "选择" if lang_mode == "中文" else "Select"
+            disp_cc = show_cc.copy()
+            if select_col_cc not in disp_cc.columns:
+                disp_cc.insert(0, select_col_cc, False)
+            else:
+                disp_cc = disp_cc[[select_col_cc] + [c for c in disp_cc.columns if c != select_col_cc]]
+
+            edited_cc = st.data_editor(
+                disp_cc,
+                use_container_width=True,
+                num_rows="fixed",
+                hide_index=True,
+                column_config={
+                    select_col_cc: st.column_config.CheckboxColumn(
+                        label=select_col_cc,
+                        help=tr("勾选要对比的合约", "Tick contracts to compare"),
+                        default=False,
+                    )
+                },
+                key="coveredcall_editor",
+            )
+            if st.button(tr("比较所选", "Compare selected")):
+                try:
+                    chosen_cc = edited_cc[edited_cc[select_col_cc] == True].copy()
+                except Exception:
+                    chosen_cc = pd.DataFrame()
+                if chosen_cc.empty:
+                    st.warning(tr("请先勾选至少一条合约", "Please select at least one contract."))
+                else:
+                    if select_col_cc in chosen_cc.columns:
+                        chosen_cc = chosen_cc.drop(columns=[select_col_cc])
+                    st.subheader(tr("🆚 所选合约对比", "🆚 Comparison"))
+                    st.dataframe(chosen_cc, use_container_width=True)
+
+        # 若尚未生成 Covered Call 列表，则给出提示
+        _cc_tbl = st.session_state.get("last_table_call")
+        if not (isinstance(_cc_tbl, pd.DataFrame) and not _cc_tbl.empty):
+            st.info(tr("点击上方按钮以生成列表。", "Click the button above to generate the list."))
+        # 结束 Covered Call 分支，避免继续执行 Sell Put 页面
+        st.stop()
 
     expirations = list(yc.get_expirations() or [])
     exp_options = [tr("自动（全部到期）", "Auto (All Expirations)")] + expirations
@@ -88,7 +294,7 @@ if ticker:
         "Discount = (Spot − Strike) / Spot. Common choice: 5%–15% below spot."
     ))
 
-    if st.button(tr("获取推荐合约", "Get Suggestions")):
+    if st.button(tr("获取推荐合约", "Get Sell Put Suggestions")):
         # ──────────────────────────────────────────────────────────────────────
         # 数据抓取
         # ──────────────────────────────────────────────────────────────────────
