@@ -14,22 +14,24 @@ Stop manually calculating option greeks — let the checker show you **the best 
 
 ## 🤔 Why Sell Put? 为什么要卖出看跌
 - If you are bullish on a stock long-term but want to enter at a lower price, selling puts allows you to collect premium.
-- 如果你看好某只股票的长期价值，但希望以更低的价格买入，可以通过卖出看跌获取权利金。
 - If at expiration the stock stays above the strike → you keep the premium as pure profit.
-- 如果到期股价未跌破行权价 → 你保留权利金作为纯收入。
 - If at expiration the stock falls below the strike → you are obligated to buy, but your effective entry = strike - premium (discounted buy).
-- 如果到期股价跌破行权价 → 你有义务买入股票，但实际买入价格 = 行权价 - 收到的权利金，等于“打折买入”。
 - So **Sell Put = Collect rent + Buy stock at discount**.
+-
+- 如果你看好某只股票的长期价值，但希望以更低的价格买入，可以通过卖出看跌获取权利金。
+- 如果到期股价跌破行权价 → 你有义务买入股票，但实际买入价格 = 行权价 - 收到的权利金，等于“打折买入”。
+- 如果到期股价未跌破行权价 → 你保留权利金作为纯收入。
 - 因此 **Sell Put = 收租金 + 打折买股票**。
 
 ## 🤔 Why Covered Call? 为什么要备兑开仓
 - If you already own the stock and expect limited upside in the short term, selling calls lets you collect premium.
-- 如果你已经持有股票，但认为短期内股价不会大幅上涨，可以通过卖出看涨收取权利金。
 - If at expiration the stock stays below the strike → you keep the premium and still hold your shares.
-- 如果到期股价未超过行权价 → 你保留权利金并继续持有股票。
 - If at expiration the stock rises above the strike → your shares may be called away, but you still gain strike + premium.
-- 如果到期股价超过行权价 → 股票可能被行权卖出，但你依然赚取了行权价 + 权利金。
 - So **Covered Call = Collect rent + Extra cash-out**.
+-
+- 如果你已经持有股票，但认为短期内股价不会大幅上涨，可以通过卖出看涨收取权利金。
+- 如果到期股价未超过行权价 → 你保留权利金并继续持有股票。
+- 如果到期股价超过行权价 → 股票可能被行权卖出，但你依然赚取了行权价 + 权利金。
 - 因此 **Covered Call = 收租金 + 额外套现**。
 
 ## ✨ Features 功能亮点
