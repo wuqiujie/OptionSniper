@@ -46,3 +46,24 @@ def annualized_return(premium: float, margin: float, days_to_exp: int, multiplie
     if margin <= 0 or days_to_exp <= 0:
         return 0.0
     return single_return(premium, margin, multiplier) / (days_to_exp / 365.0)
+
+
+# 新增：稳健的中间价计算，供 Iron Condor / Iron Butterfly 等复用
+def robust_mid(bid: float | None, ask: float | None, last: float | None) -> float:
+    """
+    返回一个稳健的中间价：
+    1. 若 bid/ask 都有效且 >0，取 (bid+ask)/2
+    2. 否则若 last 有效且 >0，取 last
+    3. 否则返回 max(bid, ask, 0.0)
+    """
+    try:
+        b = float(bid) if bid is not None else 0.0
+        a = float(ask) if ask is not None else 0.0
+        if b > 0 and a > 0:
+            return (b + a) / 2.0
+        l = float(last) if last is not None else 0.0
+        if l > 0:
+            return l
+        return max(b, a, 0.0)
+    except Exception:
+        return 0.0

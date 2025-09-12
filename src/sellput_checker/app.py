@@ -8,6 +8,100 @@ from sellput_checker.calculations import bs_d1_d2
 from sellput_checker.utils import norm_cdf
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Black-Scholes 价格（无分红，兜底用）
+# ──────────────────────────────────────────────────────────────────────────────
+def bs_price_theo(S: float, K: float, r: float, sigma: float, T: float, is_call: bool) -> float:
+    try:
+        if S <= 0 or K <= 0 or sigma <= 0 or T <= 0:
+            return 0.0
+        d1, d2 = bs_d1_d2(float(S), float(K), float(r), float(sigma), float(T))
+        if is_call:
+            # C = S*N(d1) - K*e^{-rT}*N(d2)
+            return float(S) * float(norm_cdf(d1)) - float(K) * np.exp(-float(r) * float(T)) * float(norm_cdf(d2))
+        else:
+            # P = K*e^{-rT}*N(-d2) - S*N(-d1)
+            return float(K) * np.exp(-float(r) * float(T)) * float(norm_cdf(-d2)) - float(S) * float(norm_cdf(-d1))
+    except Exception:
+        return 0.0
+
+def robust_price_fields(df: pd.DataFrame, is_call: bool, S: float, T_years: float, r: float = 0.05) -> pd.DataFrame:
+    """
+    为期权链 DataFrame 增加：
+      - mid, spread（若未有则计算）
+      - last（解析 last/last_price）
+      - theo（BS 理论价）
+      - mid_used（优先 mid；否则 last；再否则 theo；最后 max(bid,ask)）
+      - bid_used（优先 bid；否则 last；否则 theo）
+      - ask_used（优先 ask；否则 last；否则 theo）
+    """
+    df = df.copy()
+    # 规范数值列
+    for c in ["bid", "ask", "strike", "iv", "volume", "open_interest"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    if "mid" not in df.columns:
+        df["mid"] = (df.get("bid", 0).fillna(0) + df.get("ask", 0).fillna(0)) / 2
+    df["spread"] = (df.get("ask", 0).fillna(0) - df.get("bid", 0).fillna(0)).clip(lower=0)
+    # last
+    if "last" in df.columns:
+        df["last"] = pd.to_numeric(df["last"], errors="coerce")
+    elif "last_price" in df.columns:
+        df = df.rename(columns={"last_price": "last"})
+        df["last"] = pd.to_numeric(df["last"], errors="coerce")
+    else:
+        df["last"] = np.nan
+    # theo
+    def _theo(row):
+        try:
+            return bs_price_theo(float(S), float(row.get("strike", 0.0)), 0.05, max(float(row.get("iv", 0.0)), 1e-6), float(T_years), bool(is_call))
+        except Exception:
+            return 0.0
+    df["theo"] = df.apply(_theo, axis=1)
+    # used fields
+    def _mid_used(row):
+        b = float(row.get("bid", 0) or 0)
+        a = float(row.get("ask", 0) or 0)
+        m = (b + a) / 2.0 if (b > 0 and a > 0) else 0.0
+        if m > 0:
+            return m
+        l = float(row.get("last", 0) or 0)
+        if l > 0:
+            return l
+        t = float(row.get("theo", 0) or 0)
+        if t > 0:
+            return t
+        return max(b, a, 0.0)
+    def _bid_used(row):
+        b = float(row.get("bid", 0) or 0)
+        if b > 0:
+            return b
+        l = float(row.get("last", 0) or 0)
+        if l > 0:
+            return l
+        t = float(row.get("theo", 0) or 0)
+        if t > 0:
+            return t
+        return 0.0
+    def _ask_used(row):
+        a = float(row.get("ask", 0) or 0)
+        if a > 0:
+            return a
+        l = float(row.get("last", 0) or 0)
+        if l > 0:
+            return l
+        t = float(row.get("theo", 0) or 0)
+        if t > 0:
+            return t
+        return 0.0
+    df["mid_used"] = df.apply(_mid_used, axis=1)
+    df["bid_used"] = df.apply(_bid_used, axis=1)
+    df["ask_used"] = df.apply(_ask_used, axis=1)
+    # 整理成交量/OI
+    df["volume"] = df.get("volume", pd.Series(dtype=float)).fillna(0).astype(int)
+    df["open_interest"] = df.get("open_interest", pd.Series(dtype=float)).fillna(0).astype(int)
+    return df
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Language toggle and translation helper
 # ──────────────────────────────────────────────────────────────────────────────
 LANG_OPTIONS = ["English", "中文"]
@@ -24,14 +118,23 @@ st.title(tr("期权策略筛选器", "Option Strategy Checker"))
 # 模式切换：卖出看跌 / 备兑看涨（Sidebar）
 mode_key = st.sidebar.radio(
     tr("模式", "Mode"),
-    ["put", "call"],
+    ["put", "call", "iron_butterfly", "iron_condor"],
     index=0,
-    format_func=lambda x: tr("卖出看跌", "Sell Put") if x == "put" else tr("备兑看涨", "Covered Call")
+    format_func=lambda x: {
+        "put": tr("卖出看跌", "Sell Put"),
+        "call": tr("备兑看涨", "Covered Call"),
+        "iron_butterfly": tr("铁蝶（Iron Butterfly）", "Iron Butterfly"),
+        "iron_condor": tr("铁鹰（Iron Condor）", "Iron Condor"),
+    }[x]
 )
 
 # 子标题：根据模式在 Ticker 输入框之前显示
 if mode_key == "call":
     st.subheader(tr("📈 Covered Call 合约筛选", "📈 Covered Call Screener"))
+elif mode_key == "iron_butterfly":
+    st.subheader(tr("🦋 铁蝶策略筛选（仅中文）", "🦋 Iron Butterfly Screener"))
+elif mode_key == "iron_condor":
+    st.subheader(tr("🦅 铁鹰策略筛选（仅中文）", "🦅 Iron Condor Screener"))
 else:
     st.subheader(tr("📉 卖出看跌合约筛选", "📉 Sell Put Screener"))
 
@@ -235,6 +338,391 @@ if ticker:
         if not (isinstance(_cc_tbl, pd.DataFrame) and not _cc_tbl.empty):
             st.info(tr("点击上方按钮以生成列表。", "Click the button above to generate the list."))
         # 结束 Covered Call 分支，避免继续执行 Sell Put 页面
+        st.stop()
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # 铁蝶（Iron Butterfly）页面
+    # ──────────────────────────────────────────────────────────────────────────
+    elif mode_key == "iron_butterfly":
+        # 说明与使用场景（中文）
+        with st.expander("什么时候适合用『铁蝶』？（指标建议）", expanded=True):
+            st.markdown("""
+            **适用市场观点：** 中性或轻微波动（不强趋势），希望 **限定最大风险**、赚取 **较高权利金**。  
+            **建议指标范围：**
+            - **IV / IV Rank：** 中到偏高（例如 IV≥30% 或 IVR≥30–50%），越高越有利于收取较厚权利金  
+            - **到期天数（DTE）：** 常见 **7–20 天**（更快释放时间价值）或 **20–45 天**（更稳健）  
+            - **流动性：** 价差 **≤$0.10–$0.30**；**成交量 ≥100**、**未平仓量 ≥200**  
+            - **事件规避：** 尽量避开财报 / 重磅事件当周  
+            
+            **结构：**  
+            卖出 **ATM 看涨** + **ATM 看跌**（同一行权价 K，构成短跨式），同时 **买入** 两翼（K+W 与 K−W）的保护腿，形成 **买卖价差对称的蝶形**。  
+            
+            **风险回报：**  
+            - **最大收益：** 净收权利金（Credit）  
+            - **最大亏损：** 翼宽（W） − Credit  
+            - **盈亏平衡：** 约在 **K ± Credit**  
+            - **胜率直觉：** 越高的 **Credit/W**，潜在胜率越低；反之越高  
+            """)
+        
+        # 选择到期
+        expirations_bt = list(yc.get_expirations() or [])
+        if not expirations_bt:
+            st.error("无法获取期权到期日，可能是网络问题或标的无期权。")
+            st.stop()
+        exp_options_bt = [tr("自动（全部到期）", "Auto (All Expirations)")] + expirations_bt
+        exp_choice_bt = st.selectbox(tr("选择到期日", "Expiration"), exp_options_bt)
+        selected_exps_bt = expirations_bt if exp_choice_bt == exp_options_bt[0] else [exp_choice_bt]
+        
+        # 参数（默认更宽松以避免空结果）
+        wing_width_list_text = st.text_input("翼宽列表（逗号分隔）", value="3,5,10", help="仅使用此列表；示例：3,5,10")
+        min_credit = st.number_input("最小净收权利金（$）", min_value=0.0, value=0.20, step=0.05, help="若无结果，可先降到 $0.20 或增大翼宽。")
+        max_spread_b = st.slider("最大买卖价差（每腿，$）", 0.0, 1.0, 0.50, 0.01, help="仅用于流动性诊断，不直接过滤结果。")
+        min_volume_b = st.number_input("最小成交量（每腿）", min_value=0, value=0, step=10, help="仅用于流动性诊断，不直接过滤结果。")
+        allow_shift = st.slider("短腿行权价相对现价的偏移（$）", -10.0, 10.0, 0.0, 0.5, help="0 表示严格 ATM；正值=向上偏移，负值=向下偏移。")
+        
+        if st.button("获取铁蝶候选"):
+            spot_b = yc.get_spot_price()
+            all_rows_bt = []
+            for exp_bt in selected_exps_bt:
+                call_df = yc.get_option_chain(exp_bt, kind="call").copy()
+                put_df  = yc.get_option_chain(exp_bt, kind="put").copy()
+                if call_df.empty or put_df.empty:
+                    continue
+                # 统一增强预处理：含 last/theo/bid_used/ask_used/mid_used
+                T_years_bt = max(1e-6, (pd.to_datetime(exp_bt) - pd.Timestamp.today()).days / 365.0)
+                call_df = robust_price_fields(call_df, is_call=True,  S=float(spot_b), T_years=T_years_bt, r=0.05)
+                put_df  = robust_price_fields(put_df,  is_call=False, S=float(spot_b), T_years=T_years_bt, r=0.05)
+                # 选择短腿 K
+                target_k = float(spot_b) + float(allow_shift)
+                def nearest_strike(df, k):
+                    return float(df.loc[(df["strike"] - k).abs().idxmin(), "strike"])
+                K = nearest_strike(call_df, target_k)
+                K_put = nearest_strike(put_df, target_k)
+                if abs(K_put - target_k) < abs(K - target_k):
+                    K = K_put
+                # 解析翼宽列表
+                try:
+                    wing_list = [float(x.strip()) for x in str(wing_width_list_text).split(",") if x.strip() != ""]
+                except Exception:
+                    wing_list = []
+                if not wing_list:
+                    # 若用户清空输入，使用保守默认
+                    wing_list = [3.0, 5.0, 10.0]
+
+                def row_at(df, k):
+                    return df.loc[(df["strike"] - k).abs().idxmin()]
+
+                # 针对多个翼宽逐一生成候选
+                for w in wing_list:
+                    up_wing_strike   = K + float(w)
+                    down_wing_strike = K - float(w)
+                    Ku = nearest_strike(call_df, up_wing_strike)
+                    Kd = nearest_strike(put_df,  down_wing_strike)
+                    sc = row_at(call_df, K)   # 卖 Call@K
+                    sp = row_at(put_df,  K)   # 卖 Put@K
+                    lc = row_at(call_df, Ku)  # 买 Call@K+W
+                    lp = row_at(put_df,  Kd)  # 买 Put@K−W
+                    # 检查（仅作标注）
+                    legs_ok = all([
+                        sc["spread"] <= max_spread_b, sp["spread"] <= max_spread_b,
+                        lc["spread"] <= max_spread_b, lp["spread"] <= max_spread_b,
+                        sc["volume"] >= min_volume_b, sp["volume"] >= min_volume_b,
+                        lc["volume"] >= min_volume_b, lp["volume"] >= min_volume_b
+                    ])
+
+                    sc_p = float(sc.get("mid_used", sc.get("mid", 0.0)))
+                    sp_p = float(sp.get("mid_used", sp.get("mid", 0.0)))
+                    lc_p = float(lc.get("mid_used", lc.get("mid", 0.0)))
+                    lp_p = float(lp.get("mid_used", lp.get("mid", 0.0)))
+                    credit = float(sc_p + sp_p - lc_p - lp_p)
+                    width  = abs(Ku - K)
+                    if (not np.isfinite(credit)) or (width <= 0) or (credit <= 0):
+                        continue
+                    dte = (pd.to_datetime(exp_bt) - pd.Timestamp.today()).days
+                    # 盈亏
+                    be_low  = float(K - credit)
+                    be_high = float(K + credit)
+                    profit_range = f"{round(be_low,2)} 至 {round(be_high,2)}"
+                    loss_range   = f"小于 {round(be_low,2)} 或 大于 {round(be_high,2)}"
+                    max_profit = credit
+                    max_loss   = max(width - credit, 0.0)
+                    ror = (credit / max(1e-9, (width - credit)))
+                    ann = ror * (365.0 / max(1, dte)) if dte and dte > 0 else np.nan
+                    # 结果行
+                    all_rows_bt.append({
+                        "到期": exp_bt,
+                        "DTE": dte,
+                        "卖Call@K": float(K),
+                        "卖Put@K": float(K),
+                        "买Call@K+W": float(Ku),
+                        "买Put@K−W": float(Kd),
+                        "净收权利金Credit($)": round(float(credit), 2),
+                        "翼宽W($)": round(float(w), 2),
+                        "最大盈利($)": round(float(max_profit), 2),
+                        "最大亏损($)": round(float(max_loss), 2),
+                        "盈亏平衡下界": round(be_low, 2),
+                        "盈亏平衡上界": round(be_high, 2),
+                        "盈利价格范围": profit_range,
+                        "亏损价格范围": loss_range,
+                        "每腿最大价差($)": max(float(sc["spread"]), float(sp["spread"]), float(lc["spread"]), float(lp["spread"])),
+                        "每腿最小成交量": int(min(sc["volume"], sp["volume"], lc["volume"], lp["volume"])),
+                        "是否通过流动性检查": "是" if legs_ok else "否",
+                    })
+            res = pd.DataFrame(all_rows_bt)
+            if not res.empty:
+                res = res[res["净收权利金Credit($)"].fillna(0) >= float(min_credit)]
+            st.subheader("✅ 铁蝶候选")
+            st.dataframe(res, use_container_width=True)
+            if res.empty:
+                st.info("可尝试：增大翼宽、降低最小权利金门槛、放宽价差或成交量要求。")
+        
+        st.stop()
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # 铁鹰（Iron Condor）页面
+    # ──────────────────────────────────────────────────────────────────────────
+    elif mode_key == "iron_condor":
+        # 说明与使用场景（中文）
+        with st.expander("什么时候适合用『铁鹰』？（指标建议）", expanded=True):
+            st.markdown("""
+            **适用市场观点：** 中性或「区间震荡」，认为标的 **不会大幅单边**。  
+            **建议指标范围：**
+            - **短腿 Delta：** **0.15–0.30**（两侧对称），越小越保守  
+            - **翼宽（$）：** 固定宽度（如 $3 / $5 / $10），越宽越保守  
+            - **IV / IV Rank：** 中到偏高（IVR≥30–50% 更佳）  
+            - **到期天数（DTE）：** 常见 **20–45 天**（时间价值衰减与风险平衡）  
+            - **目标净收：** 一般 **Credit 占翼宽的 20–35%**  
+            - **流动性：** 价差 **≤$0.10–$0.30**；**成交量 ≥100**、**未平仓量 ≥200**  
+            - **事件规避：** 避开财报/重磅消息当周
+            
+            **结构：**  
+            PUT 端：卖出较高 Delta 的看跌，买入更低行权价的看跌（形成牛市看跌价差）  
+            CALL 端：卖出较高 Delta 的看涨，买入更高行权价的看涨（形成熊市看涨价差）  
+            两侧组成 **有限风险** 的铁鹰。  
+            
+            **风险回报（对称翼宽）**  
+            - **最大收益：** 净收权利金（Credit）  
+            - **最大亏损：** 翼宽（W） − Credit  
+            - **胜率直觉：** 约 **1 − Credit/W**  
+            """)
+        
+        expirations_ic = list(yc.get_expirations() or [])
+        if not expirations_ic:
+            st.error("无法获取期权到期日，可能是网络问题或标的无期权。")
+            st.stop()
+        exp_options_ic = [tr("自动（全部到期）", "Auto (All Expirations)")] + expirations_ic
+        exp_choice_ic = st.selectbox(tr("选择到期日", "Expiration"), exp_options_ic)
+        selected_exps_ic = expirations_ic if exp_choice_ic == exp_options_ic[0] else [exp_choice_ic]
+        
+        # 参数（默认更宽松以避免空结果）
+        short_delta_low, short_delta_high = st.slider("短腿 |Delta| 目标区间", 0.00, 0.60, (0.10, 0.35), 0.01)
+        wing_width_list_text_ic = st.text_input("翼宽列表（逗号分隔）", value="3,5,10,15,20", help="仅使用此列表；示例：3,5,10")
+        min_credit_ic = st.number_input("最小净收权利金（$）", min_value=0.0, value=0.20, step=0.05, help="若无结果，可先降到 $0.20 或增大翼宽。")
+        max_spread_ic = st.slider("最大买卖价差（每腿，$）", 0.0, 1.0, 0.30, 0.01, help="仅用于流动性诊断，不直接过滤结果。")
+        min_volume_ic = st.number_input("最小成交量（每腿）", min_value=0, value=100, step=10, help="仅用于流动性诊断，不直接过滤结果。")
+        top_k_short_ic = st.number_input(
+            "每侧短腿候选数", min_value=1, max_value=10, value=3, step=1,
+            help="从各侧最优短腿中取前 N 个进行两两配对，生成多组铁鹰候选"
+        )
+        
+        if st.button("获取铁鹰候选"):
+            spot_ic = yc.get_spot_price()
+            all_rows_ic = []
+            for exp_ic in selected_exps_ic:
+                call_df = yc.get_option_chain(exp_ic, kind="call").copy()
+                put_df  = yc.get_option_chain(exp_ic, kind="put").copy()
+                if call_df.empty or put_df.empty:
+                    continue
+                T_years_ic = max(1e-6, (pd.to_datetime(exp_ic) - pd.Timestamp.today()).days / 365.0)
+                call_df = robust_price_fields(call_df, is_call=True,  S=float(spot_ic), T_years=T_years_ic, r=0.05)
+                put_df  = robust_price_fields(put_df,  is_call=False, S=float(spot_ic), T_years=T_years_ic, r=0.05)
+                # Delta
+                def add_delta(df, is_call: bool):
+                    rows = []
+                    for _, row in df.iterrows():
+                        try:
+                            S = float(spot_ic)
+                            K = float(row.get("strike", 0.0))
+                            sigma = float(row.get("iv", 0.0))
+                            T = max(1e-6, (pd.to_datetime(exp_ic) - pd.Timestamp.today()).days / 365.0)
+                            r = 0.05
+                            d1, _ = bs_d1_d2(S, K, r, max(sigma, 1e-6), T)
+                            if is_call:
+                                delta = float(norm_cdf(d1))
+                            else:
+                                delta = float(1.0 - norm_cdf(d1))
+                        except Exception:
+                            delta = np.nan
+                        rows.append(delta)
+                    df["delta_abs"] = pd.Series(rows, index=df.index)
+                add_delta(call_df, True)
+                add_delta(put_df, False)
+                # --- Improved short-leg selection (maximize credit within Delta band & keep OTM) ---
+                target_delta = (short_delta_low + short_delta_high) / 2.0
+
+                def _short_put_candidates(df, top_k: int) -> pd.DataFrame:
+                    S = float(spot_ic)
+                    # 1) Strict OTM + Delta band
+                    cand = df[(df["strike"] < S) & (df["delta_abs"] >= short_delta_low) & (df["delta_abs"] <= short_delta_high)].copy()
+                    # 2) If empty, relax Delta but keep OTM
+                    if cand.empty:
+                        cand = df[df["strike"] < S].copy()
+                    # 3) If still empty, return nearest-below
+                    if cand.empty:
+                        below = df[df["strike"] < S].copy()
+                        if not below.empty:
+                            # just return the single nearest-below
+                            below["k_gap"] = (below["strike"] - S).abs()
+                            return below.sort_values(["k_gap"], ascending=[True]).head(1)
+                    # Sort by premium then higher strike
+                    price_col = "mid_used" if "mid_used" in cand.columns else ("bid_used" if "bid_used" in cand.columns else "mid")
+                    cand["_price_for_sort"] = pd.to_numeric(cand.get(price_col, 0), errors="coerce").fillna(0)
+                    cand = cand.sort_values(["_price_for_sort", "strike"], ascending=[False, False])
+                    return cand.head(int(top_k)).copy()
+
+                def _short_call_candidates(df, top_k: int) -> pd.DataFrame:
+                    S = float(spot_ic)
+                    # 1) Strict OTM + Delta band
+                    cand = df[(df["strike"] > S) & (df["delta_abs"] >= short_delta_low) & (df["delta_abs"] <= short_delta_high)].copy()
+                    # 2) If empty, relax Delta but keep OTM
+                    if cand.empty:
+                        cand = df[df["strike"] > S].copy()
+                    # 3) If still empty, return nearest-above
+                    if cand.empty:
+                        above = df[df["strike"] > S].copy()
+                        if not above.empty:
+                            # just return the single nearest-above
+                            above["k_gap"] = (above["strike"] - S).abs()
+                            return above.sort_values(["k_gap"], ascending=[True]).head(1)
+                    # Sort by premium then lower strike (closer to spot)
+                    price_col = "mid_used" if "mid_used" in cand.columns else ("bid_used" if "bid_used" in cand.columns else "mid")
+                    cand["_price_for_sort"] = pd.to_numeric(cand.get(price_col, 0), errors="coerce").fillna(0)
+                    cand = cand.sort_values(["_price_for_sort", "strike"], ascending=[False, True])
+                    return cand.head(int(top_k)).copy()
+
+                put_cands  = _short_put_candidates(put_df,  top_k_short_ic)
+                call_cands = _short_call_candidates(call_df, top_k_short_ic)
+
+                # Build combinations of (sp, sc)
+                combo_pairs = []
+                for _, sp_row in put_cands.iterrows():
+                    for _, sc_row in call_cands.iterrows():
+                        sp_k = float(sp_row.get("strike", -1e9))
+                        sc_k = float(sc_row.get("strike",  1e9))
+                        # enforce iron condor shape (put < call). If not, try to skip
+                        if sp_k >= sc_k:
+                            continue
+                        combo_pairs.append((sp_row, sc_row))
+
+                # if nothing passed (e.g., malformed chain), fall back to nearest-OTM pair
+                if not combo_pairs:
+                    try:
+                        # nearest-below for put, nearest-above for call
+                        S = float(spot_ic)
+                        below = put_df[put_df["strike"] < S].copy()
+                        above = call_df[call_df["strike"] > S].copy()
+                        if not below.empty and not above.empty:
+                            below["k_gap"] = (below["strike"] - S).abs()
+                            above["k_gap"] = (above["strike"] - S).abs()
+                            sp_fallback = below.sort_values(["k_gap"], ascending=[True]).iloc[0]
+                            sc_fallback = above.sort_values(["k_gap"], ascending=[True]).iloc[0]
+                            combo_pairs = [(sp_fallback, sc_fallback)]
+                    except Exception:
+                        combo_pairs = []
+
+                def nearest_row(df, target_strike):
+                    idx = (df["strike"] - target_strike).abs().idxmin()
+                    return df.loc[idx]
+                # 解析翼宽列表
+                try:
+                    wing_list_ic = [float(x.strip()) for x in str(wing_width_list_text_ic).split(",") if x.strip() != ""]
+                except Exception:
+                    wing_list_ic = []
+                if not wing_list_ic:
+                    wing_list_ic = [3.0, 5.0, 10.0]
+
+                for sp, sc in combo_pairs:
+                    # Recompute a quick sanity check per pair (keep OTM)
+                    try:
+                        S = float(spot_ic)
+                        if float(sp.get("strike", -1e9)) >= S:
+                            below = put_df[put_df["strike"] < S].copy()
+                            if not below.empty:
+                                sp = below.loc[below["strike"].idxmax()]
+                        if float(sc.get("strike", 1e9)) <= S:
+                            above = call_df[call_df["strike"] > S].copy()
+                            if not above.empty:
+                                sc = above.loc[above["strike"].idxmin()]
+                    except Exception:
+                        pass
+
+                    # Prevent accidental iron butterfly (call <= put)
+                    try:
+                        if float(sp["strike"]) >= float(sc["strike"]):
+                            # push call up minimally
+                            try:
+                                strikes = np.sort(call_df["strike"].dropna().unique())
+                                step = float(np.min(np.diff(strikes))) if len(strikes) >= 2 else 1.0
+                            except Exception:
+                                step = 1.0
+                            sc = call_df.loc[(call_df["strike"] - (float(sp["strike"]) + step)).abs().idxmin()]
+                    except Exception:
+                        pass
+
+                    for w in wing_list_ic:
+                        lp = nearest_row(put_df,  float(sp["strike"]) - float(w))   # 买 Put（保护）
+                        lc = nearest_row(call_df, float(sc["strike"]) + float(w))   # 买 Call（保护）
+                        # 流动性标注
+                        legs_ok = all([
+                            float(sp["spread"]) <= max_spread_ic, float(lp["spread"]) <= max_spread_ic,
+                            float(sc["spread"]) <= max_spread_ic, float(lc["spread"]) <= max_spread_ic,
+                            int(sp["volume"]) >= min_volume_ic,   int(lp["volume"]) >= min_volume_ic,
+                            int(sc["volume"]) >= min_volume_ic,   int(lc["volume"]) >= min_volume_ic,
+                        ])
+                        sp_p = float(sp.get("mid_used", sp.get("mid", 0.0)))
+                        lp_p = float(lp.get("mid_used", lp.get("mid", 0.0)))
+                        sc_p = float(sc.get("mid_used", sc.get("mid", 0.0)))
+                        lc_p = float(lc.get("mid_used", lc.get("mid", 0.0)))
+                        credit = float(sp_p - lp_p + sc_p - lc_p)
+                        width  = float(w)
+                        if (not np.isfinite(credit)) or (width <= 0) or (credit <= 0):
+                            continue
+                        dte = (pd.to_datetime(exp_ic) - pd.Timestamp.today()).days
+                        be_low  = float(sp["strike"]) - float(credit)
+                        be_high = float(sc["strike"]) + float(credit)
+                        profit_range = f"{round(be_low,2)} 至 {round(be_high,2)}"
+                        loss_range   = f"小于 {round(be_low,2)} 或 大于 {round(be_high,2)}"
+                        max_profit = credit
+                        max_loss   = max(width - credit, 0.0)
+                        ror = (credit / max(1e-9, (width - credit)))
+                        ann = ror * (365.0 / max(1, dte)) if dte and dte > 0 else np.nan
+                        all_rows_ic.append({
+                            "到期": exp_ic,
+                            "DTE": dte,
+                            "卖Put(短PUT)": float(sp["strike"]),
+                            "买Put(保护)": float(lp["strike"]),
+                            "卖Call(短CALL)": float(sc["strike"]),
+                            "买Call(保护)": float(lc["strike"]),
+                            "净收权利金Credit($)": round(float(credit), 2),
+                            "翼宽W($)": round(float(w), 2),
+                            "最大盈利($)": round(float(max_profit), 2),
+                            "最大亏损($)": round(float(max_loss), 2),
+                            "盈亏平衡下界": round(be_low, 2),
+                            "盈亏平衡上界": round(be_high, 2),
+                            "盈利价格范围": profit_range,
+                            "亏损价格范围": loss_range,
+                            "每腿最大价差($)": max(float(sp["spread"]), float(lp["spread"]), float(sc["spread"]), float(lc["spread"])) ,
+                            "每腿最小成交量": int(min(sp["volume"], lp["volume"], sc["volume"], lc["volume"])) ,
+                            "是否通过流动性检查": "是" if legs_ok else "否",
+                        })
+            res = pd.DataFrame(all_rows_ic)
+            if not res.empty:
+                res = res[res["净收权利金Credit($)"].fillna(0) >= float(min_credit_ic)]
+            st.subheader("✅ 铁鹰候选")
+            st.dataframe(res, use_container_width=True)
+            if res.empty:
+                st.info("可尝试：增大翼宽、降低最小权利金门槛、放宽价差或成交量要求、调整 Delta 区间。")
+        
         st.stop()
 
     expirations = list(yc.get_expirations() or [])
