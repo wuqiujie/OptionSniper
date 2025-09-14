@@ -2,6 +2,9 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
+# 页面基本设置
+st.set_page_config(page_title="Option Strategy Checker", layout="wide")
+
 from sellput_checker.yahoo_client import YahooClient
 from sellput_checker.checklist import evaluate_chain_df
 from sellput_checker.calculations import bs_d1_d2
@@ -111,8 +114,6 @@ def tr(cn: str, en: str) -> str:
     """Return a string based on the current language mode (English/中文)."""
     return cn if lang_mode == "中文" else en
 
-# 页面基本设置
-st.set_page_config(page_title="Option Strategy Checker", layout="wide")
 st.title(tr("期权策略筛选器", "Option Strategy Checker"))
 
 # 模式切换：卖出看跌 / 备兑看涨（Sidebar）
@@ -759,7 +760,7 @@ if ticker:
 
     iv_min_percent, iv_max_percent = st.slider(
         tr("隐含波动率 IV 区间（%）", "IV Range (%)"),
-        0.0, 300.0, (0.0, 120.0), 0.5,
+        0.0, 300.0, (2.0, 150.0), 0.5,
         help=tr("建议范围：20%~120%。IV 越高=权利金越丰但波动/风险更大；IV 越低=更稳但权利金偏少。", "Suggested: 20%–120%. Higher IV = richer premium but more volatility/risk; lower IV = steadier but smaller premium.")
     )  # ← IV过滤；高IV=高权利金高风险，低IV=低权利金低风险
     iv_min = iv_min_percent / 100.0  # ← 转为小数
@@ -767,7 +768,7 @@ if ticker:
 
     max_spread = st.slider(
         tr("最大买卖价差（美元）", "Max Bid-Ask Spread ($)"),
-        0.0, 3.0, 0.10, 0.01,
+        0.0, 3.0, 0.30, 0.01,
         help=tr("建议范围：$0.05~$0.30。越小=流动性越好、滑点小；越大=成交更困难、真实收益打折。", "Suggested: $0.05–$0.30. Smaller = better liquidity, less slippage; larger = harder fills, lower realized return.")
     )  # ← 价差上限；小=流动性友好，大=滑点风险高
 
