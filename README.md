@@ -47,9 +47,16 @@ Stop manually calculating option greeks — let the checker show you **the best 
 ## 🛠️ Usage 使用说明
 ```bash
 git clone https://github.com/wuqiujie/OptionStrategyChecker.git
-cd sellput-checker
-pip install -r requirements.txt
- ./run.sh
+cd OptionSniper
+
+# 首次运行（自动创建虚拟环境并安装依赖）
+./run.sh
+
+# 若环境损坏，可重建
+./run.sh --recreate
+
+# 只安装/更新依赖，不启动应用
+./run.sh --no-run
 ```
 
 
