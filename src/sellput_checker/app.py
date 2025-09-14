@@ -116,7 +116,7 @@ def tr(cn: str, en: str) -> str:
 
 st.title(tr("期权策略筛选器", "Option Strategy Checker"))
 
-# 模式切换：卖出看跌 / 备兑看涨（Sidebar）
+# 模式切换（Sidebar）
 mode_key = st.sidebar.radio(
     tr("模式", "Mode"),
     ["put", "call", "iron_butterfly", "iron_condor"],
@@ -760,7 +760,7 @@ if ticker:
 
     iv_min_percent, iv_max_percent = st.slider(
         tr("隐含波动率 IV 区间（%）", "IV Range (%)"),
-        0.0, 300.0, (2.0, 150.0), 0.5,
+        0.0, 300.0, (0.0, 150.0), 0.5,
         help=tr("建议范围：20%~120%。IV 越高=权利金越丰但波动/风险更大；IV 越低=更稳但权利金偏少。", "Suggested: 20%–120%. Higher IV = richer premium but more volatility/risk; lower IV = steadier but smaller premium.")
     )  # ← IV过滤；高IV=高权利金高风险，低IV=低权利金低风险
     iv_min = iv_min_percent / 100.0  # ← 转为小数
@@ -822,80 +822,6 @@ if ticker:
 
         out = pd.concat(all_rows, ignore_index=True)
 
-        # # 调试信息：查看报价质量
-        # try:
-        #     st.sidebar.markdown("**[DEBUG] Quotes Overview**")
-        #     st.sidebar.write("Rows:", len(out))
-        #     st.sidebar.write("Bid>0 count:", int((out["bid"] > 0).sum()))
-        #     st.sidebar.write("Ask>0 count:", int((out["ask"] > 0).sum()))
-        #     st.sidebar.write("Mid>0 count:", int((out["mid"] > 0).sum()) if "mid" in out.columns else "N/A")
-        #     st.sidebar.write("Spread>0 count:", int((out["spread"] > 0).sum()) if "spread" in out.columns else "N/A")
-        # except Exception:
-        #     pass
-
-        # # 各单项条件的通过统计（在最终筛选前）
-        # try:
-        #     if all(col in out.columns for col in ["ok_delta", "ok_iv", "ok_spread", "ok_volume", "ok_annual"]):
-        #         st.sidebar.markdown("**[DEBUG] Per-criterion pass (pre-filter)**")
-        #         st.sidebar.write("ok_delta:", int(out["ok_delta"].sum()))
-        #         st.sidebar.write("ok_iv:", int(out["ok_iv"].sum()))
-        #         st.sidebar.write("ok_spread:", int(out["ok_spread"].sum()))
-        #         st.sidebar.write("ok_volume:", int(out["ok_volume"].sum()))
-        #         st.sidebar.write("ok_annual:", int(out["ok_annual"].sum()))
-        # except Exception:
-        #     pass
-
-        # # 诊断：条件交集与失败原因分布（在最终筛选前）
-        # try:
-        #     need_cols = ["ok_delta", "ok_iv", "ok_spread", "ok_volume", "ok_annual"]
-        #     if all(c in out.columns for c in need_cols):
-        #         m = out[need_cols].astype(bool)
-        #         st.sidebar.markdown("**[DEBUG] Intersections (pre-filter)**")
-        #         both_va = int((m["ok_volume"] & m["ok_annual"]).sum())
-        #         both_vd = int((m["ok_volume"] & m["ok_delta"]).sum())
-        #         both_vs = int((m["ok_volume"] & m["ok_spread"]).sum())
-        #         both_vi = int((m["ok_volume"] & m["ok_iv"]).sum())
-        #         both_ad = int((m["ok_annual"] & m["ok_delta"]).sum())
-        #         both_as = int((m["ok_annual"] & m["ok_spread"]).sum())
-        #         both_ai = int((m["ok_annual"] & m["ok_iv"]).sum())
-        #         st.sidebar.write("ok_volume ∩ ok_annual:", both_va)
-        #         st.sidebar.write("ok_volume ∩ ok_delta:", both_vd)
-        #         st.sidebar.write("ok_volume ∩ ok_spread:", both_vs)
-        #         st.sidebar.write("ok_volume ∩ ok_iv:", both_vi)
-        #         st.sidebar.write("ok_annual ∩ ok_delta:", both_ad)
-        #         st.sidebar.write("ok_annual ∩ ok_spread:", both_as)
-        #         st.sidebar.write("ok_annual ∩ ok_iv:", both_ai)
-
-        #         # 失败原因标签（每行列出未通过的条件）
-        #         fail_cols = []
-        #         for c in need_cols:
-        #             fail_cols.append(np.where(m[c], "", c.replace("ok_", "")))
-        #         # 逐列拼接失败标签
-        #         fail_tags = fail_cols[0]
-        #         for arr in fail_cols[1:]:
-        #             fail_tags = np.core.defchararray.add(
-        #                 np.where((fail_tags != "") & (arr != ""), fail_tags + "|", fail_tags), arr
-        #             )
-        #         out["why_not"] = pd.Series(fail_tags, index=out.index)
-
-        #         # 展示最常见的失败组合 Top 10
-        #         top_fail = (
-        #             out["why_not"]
-        #             .replace("", "pass_all")
-        #             .value_counts()
-        #             .head(10)
-        #             .rename_axis("failed_reasons")
-        #             .reset_index(name="count")
-        #         )
-        #         st.sidebar.markdown("**[DEBUG] Top failure combos**")
-        #         for _, row in top_fail.iterrows():
-        #             st.sidebar.write(f"{row['failed_reasons']}: {int(row['count'])}")
-        # except Exception:
-        #     pass
-
-        # 百分比转小数
-        # (Removed redundant conversion here)
-
         # 合并后的结果再统一做最终筛选
         out = out[out["ok_all"] == True]
         # 计算：行权价相对现价的折价（%）
@@ -907,32 +833,6 @@ if ticker:
         except Exception:
             out["discount_pct"] = np.nan
 
-        # 额外可选过滤：只保留有真实 B/A 的合约；或隐藏 THEO 兜底的行
-        require_ba = st.sidebar.checkbox(
-            tr("只保留有买卖双边报价 (B/A)", "Require real Bid & Ask"), value=False,
-            help=tr("开启后，仅显示同时有买价和卖价的合约。","Show rows that have both Bid and Ask > 0.")
-        )
-        hide_theo = st.sidebar.checkbox(
-            tr("隐藏 THEO 兜底行", "Hide THEO fallback rows"), value=False,
-            help=tr("不展示 price_source 为 THEO（理论价兜底）的行。","Hide rows where price_source is THEO (theoretical fallback).")
-        )
-        if require_ba and ("bid" in out.columns) and ("ask" in out.columns):
-            out = out[(out["bid"].fillna(0) > 0) & (out["ask"].fillna(0) > 0)]
-        if hide_theo and ("price_source" in out.columns):
-            out = out[out["price_source"].astype(str).str.upper() != "THEO"]
-
-        # 排序选项
-        sort_key = st.sidebar.selectbox(
-            tr("排序字段", "Sort by"),
-            [
-                "annualized_return", "single_return", "days_to_exp",
-                "iv", "delta", "assign_prob_est", "volume", "open_interest", "strike"
-            ], index=0
-        )
-        sort_asc = st.sidebar.checkbox(tr("升序排序", "Ascending order"), value=False)
-        if sort_key in out.columns:
-            out = out.sort_values(sort_key, ascending=sort_asc, kind="mergesort")
-
         # 若仍为 0，给出放宽建议（只显示提示，不改变参数）
         if len(out) == 0:
             try:
@@ -942,17 +842,6 @@ if ticker:
                 ))
             except Exception:
                 pass
-
-        # 调试信息（已筛选后的数据）
-        # try:
-        #     st.sidebar.markdown("**[DEBUG] Filtered (ok_all=True)**")
-        #     st.sidebar.write("Rows (filtered):", len(out))
-        #     st.sidebar.write("Bid>0 (filtered):", int((out["bid"] > 0).sum()))
-        #     st.sidebar.write("Ask>0 (filtered):", int((out["ask"] > 0).sum()))
-        #     st.sidebar.write("Mid>0 (filtered):", int((out["mid"] > 0).sum()) if "mid" in out.columns else "N/A")
-        #     st.sidebar.write("Spread>0 (filtered):", int((out["spread"] > 0).sum()) if "spread" in out.columns else "N/A")
-        # except Exception:
-        #     pass
 
         # 展示列（包含折价%）
         use_display = st.sidebar.checkbox(
