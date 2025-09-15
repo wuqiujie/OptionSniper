@@ -55,6 +55,10 @@ source "$VENV_DIR/bin/activate" || die "激活虚拟环境失败。"
 info "升级 pip/setuptools/wheel"
 python -m pip install --upgrade pip setuptools wheel
 
+# 确保安装 Streamlit
+info "安装/升级 Streamlit"
+pip install --upgrade streamlit
+
 # 安装项目依赖
 if [[ -f "$REQUIREMENTS_FILE" ]]; then
   info "安装依赖: $REQUIREMENTS_FILE"
